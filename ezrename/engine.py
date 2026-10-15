@@ -39,6 +39,11 @@ RESERVED_NAMES = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10))
 MAX_PATH = 259          # longest full path most Windows programs accept
 MAX_NAME = 255          # longest single file name
 TEMP_PREFIX = ".ezrename-"
+# Files Windows and Office keep in folders for themselves. Renaming them breaks things
+# (desktop.ini holds a folder's icon and name; ~$ files are Office's open-document locks),
+# so they are never listed, even when chosen one by one.
+SYSTEM_NAMES = {"desktop.ini", "thumbs.db", "ehthumbs.db", ".ds_store"}
+_HIDDEN, _SYSTEM = 0x2, 0x4      # os.stat().st_file_attributes on Windows
 LOG_HEADER = ["Old path", "New path"]
 
 OK, SAME, BLOCKED = "ok", "same", "blocked"
@@ -60,7 +65,11 @@ class PreviewRow:
     item: FileItem
     new_name: str
     status: str = OK            # ok | same | blocked
-    problem: str = ""
+    problem: str = ""           # short, for the Status column: "Duplicate name (3 files)"
+    detail: str = ""            # the full explanation, shown when the row is clicked
+
+    def block(self, problem: str, detail: str) -> None:
+        self.status, self.problem, self.detail = BLOCKED, problem, detail
 
     @property
     def new_path(self) -> str:
@@ -113,19 +122,38 @@ def _item(path: str) -> Optional[FileItem]:
                     name=os.path.basename(path), size=st.st_size, modified=st.st_mtime, created=created)
 
 
+def is_system_file(name: str) -> bool:
+    """desktop.ini, Thumbs.db, Office lock files (~$...) and our own temporary files."""
+    lower = name.lower()
+    return lower in SYSTEM_NAMES or name.startswith(("~$", TEMP_PREFIX))
+
+
+def _hidden_or_system(path: str) -> bool:
+    """Hidden or system files in a scanned folder are skipped (Windows attributes, or a leading dot)."""
+    if os.path.basename(path).startswith("."):
+        return True
+    try:
+        attrs = getattr(os.stat(path), "st_file_attributes", 0)
+    except OSError:
+        return True
+    return bool(attrs & (_HIDDEN | _SYSTEM))
+
+
 def collect(paths: Iterable[str], include_subfolders: bool = False,
             extensions: frozenset[str] = frozenset(), cancel: Cancel = None) -> list[FileItem]:
     """Files from dropped or chosen paths. A folder adds the files in it (and below, if asked).
 
-    Hidden temporary files from an interrupted rename are never listed.
+    Never listed: system files (desktop.ini, Thumbs.db, ~$ Office lock files, our own
+    temporary files) and, inside scanned folders, hidden files. A file chosen one by
+    one is listed even if hidden — the user picked it.
     """
     found: dict[str, FileItem] = {}
 
-    def add(path: str) -> None:
+    def add(path: str, scanned: bool) -> None:
         name = os.path.basename(path)
-        if name.startswith(TEMP_PREFIX):
+        if is_system_file(name) or (scanned and _hidden_or_system(path)):
             return
-        if extensions and os.path.splitext(name)[1].lower() not in extensions:
+        if extensions and extension_of(name) not in extensions:
             return
         item = _item(path)
         if item is not None:
@@ -135,13 +163,14 @@ def collect(paths: Iterable[str], include_subfolders: bool = False,
         if cancel is not None and cancel.is_set():
             break
         if os.path.isfile(path):
-            add(path)
+            add(path, scanned=False)
         elif os.path.isdir(path):
             if include_subfolders:
                 for root, dirs, files in os.walk(path):
                     dirs.sort(key=natural_key)
+                    dirs[:] = [d for d in dirs if not _hidden_or_system(os.path.join(root, d))]
                     for f in sorted(files, key=natural_key):
-                        add(os.path.join(root, f))
+                        add(os.path.join(root, f), scanned=True)
                     if cancel is not None and cancel.is_set():
                         break
             else:
@@ -152,8 +181,26 @@ def collect(paths: Iterable[str], include_subfolders: bool = False,
                 for f in names:
                     full = os.path.join(path, f)
                     if os.path.isfile(full):
-                        add(full)
+                        add(full, scanned=True)
     return list(found.values())
+
+
+def extension_of(name: str) -> str:
+    """".pdf" for "Report.PDF"; "" for a file without an extension."""
+    return os.path.splitext(name)[1].lower()
+
+
+def extension_counts(items: Iterable[FileItem]) -> list[tuple[str, int]]:
+    """The file types present, most common first: [(".pdf", 12), (".jpg", 3), ("", 1)]."""
+    counts: dict[str, int] = defaultdict(int)
+    for item in items:
+        counts[extension_of(item.name)] += 1
+    return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+
+
+def extension_label(ext: str) -> str:
+    """"PDF" for ".pdf"; "No extension" for ""."""
+    return ext.lstrip(".").upper() if ext else "No extension"
 
 
 def sort_items(items: list[FileItem], by: str = "name") -> list[FileItem]:
@@ -168,23 +215,28 @@ def sort_items(items: list[FileItem], by: str = "name") -> list[FileItem]:
 
 
 # ================================================================ checking names
-def name_problem(name: str) -> str:
-    """Why Windows would refuse this file name, or "" if it is fine."""
+def name_problem(name: str) -> tuple[str, str]:
+    """Why Windows would refuse this file name: (short label, full explanation), or ("", "")."""
     if not name or not name.strip():
-        return "The new name is empty"
+        return "Empty name", "The rules leave this file without a name."
     bad = sorted({ch for ch in name if ch in ILLEGAL_CHARS})
     if bad:
         shown = " ".join("(control character)" if ord(ch) < 32 else ch for ch in bad)
-        return f"Windows doesn't allow these characters in a name: {shown}"
+        return (f"Not allowed: {shown}",
+                'Windows doesn\'t allow these characters in file names: < > : " / \\ | ? *')
     if name.endswith((" ", ".")):
-        return "A name can't end with a space or a dot"
-    if os.path.splitext(name)[0].upper().rstrip(" .") in RESERVED_NAMES or name.upper() in RESERVED_NAMES:
-        return f"\"{os.path.splitext(name)[0]}\" is a name Windows reserves for devices"
+        return "Ends with a space or dot", "Windows doesn't allow a file name to end with a space or a dot."
+    stem = os.path.splitext(name)[0]
+    if stem.upper().rstrip(" .") in RESERVED_NAMES or name.upper() in RESERVED_NAMES:
+        return (f"Reserved name: {stem}",
+                f"“{stem}” is reserved by Windows for devices (CON, PRN, AUX, NUL, COM1–9, LPT1–9).")
     if name.startswith(TEMP_PREFIX):
-        return "That name is used by EZ Bulk Rename for temporary files"
+        return ("Reserved name",
+                f"Names starting with {TEMP_PREFIX} are used for temporary files while renaming.")
     if len(name) > MAX_NAME:
-        return f"The name is too long ({len(name)} characters; Windows allows {MAX_NAME})"
-    return ""
+        return (f"Name too long ({len(name)})",
+                f"The name has {len(name)} characters; Windows allows {MAX_NAME}.")
+    return "", ""
 
 
 def _folder_names(folder: str, cache: dict[str, set[str]]) -> set[str]:
@@ -214,14 +266,16 @@ def build_preview(items: list[FileItem], rules: list[Rule], cancel: Cancel = Non
         new = apply_rules(item.name, rules, info)
         row = PreviewRow(item=item, new_name=new, status=SAME if new == item.name else OK)
         if row.status == OK:
-            problem = name_problem(new)
+            problem, detail = name_problem(new)
             ext = os.path.splitext(item.name)[1]
             if not problem and ext and new.lower() == ext.lower():
-                problem = "The new name is empty (only the extension is left)"
+                problem, detail = "Empty name", f"Only the extension would be left ({new})."
             if not problem and len(row.new_path) > MAX_PATH:
-                problem = f"The full path is too long ({len(row.new_path)} characters; Windows allows {MAX_PATH})"
+                problem = f"Path too long ({len(row.new_path)})"
+                detail = (f"The full path would be {len(row.new_path)} characters; most Windows programs "
+                          f"accept up to {MAX_PATH}.")
             if problem:
-                row.status, row.problem = BLOCKED, problem
+                row.block(problem, detail)
         rows.append(row)
 
     # Two files must not end up with the same name in the same folder.
@@ -232,8 +286,9 @@ def build_preview(items: list[FileItem], rules: list[Rule], cancel: Cancel = Non
         if len(group) > 1:
             for row in group:
                 if row.status != BLOCKED or not row.problem:
-                    row.status = BLOCKED
-                    row.problem = f"{len(group)} files would get this same name"
+                    row.block(f"Duplicate name ({len(group)} files)",
+                              f"{len(group)} files in this folder would get the same name. Add a numbering "
+                              "or date rule to keep them apart.")
 
     # A file that is already there (and is not itself being renamed away) can't be replaced.
     cache: dict[str, set[str]] = {}
@@ -247,8 +302,8 @@ def build_preview(items: list[FileItem], rules: list[Rule], cancel: Cancel = Non
         folder = os.path.normcase(row.item.folder)
         occupied = _folder_names(row.item.folder, cache) - leaving[folder]
         if row.new_name.lower() in occupied:
-            row.status = BLOCKED
-            row.problem = "A file with this name is already in the folder"
+            row.block("Name already in use",
+                      "Another file in this folder already has this name. EZ Bulk Rename never replaces a file.")
 
     return Preview(rows=rows,
                    changing=sum(r.status == OK for r in rows),

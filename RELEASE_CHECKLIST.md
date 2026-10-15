@@ -26,7 +26,8 @@ Windows Sandbox is free on Windows 10/11 Pro. Turn it on once via
 Use **copies** of real files (scans, photos, invoices) in a test folder.
 
 - [ ] Drag a folder onto the window, then a few loose files: all are listed, nothing duplicated.
-- [ ] "Include subfolders" and "Only these extensions" change the list as expected.
+- [ ] "Include subfolders" and the File types tick boxes (with counts, All / None) change the list as
+      expected. desktop.ini, Thumbs.db and ~$ Office lock files are never listed.
 - [ ] Stack three rules (e.g. spaces to _, numbering, lower case); reorder them with the
       arrows: the preview changes accordingly before anything is renamed.
 - [ ] Make two files get the same name: both rows turn red, Rename stays disabled.
@@ -36,12 +37,12 @@ Use **copies** of real files (scans, photos, invoices) in a test folder.
 - [ ] Rename a file that is open in Word or Excel: a clear message, and NOTHING was renamed
       (check the other files too).
 - [ ] Swap two names (a to b, b to a) and a case-only change (invoice.pdf to INVOICE.pdf).
-- [ ] Names from a list: load an .xlsx and a .csv (Excel "CSV UTF-8") with a header row;
+- [ ] Rename from list: load an .xlsx and a .csv (Excel "CSV UTF-8") with a header row;
       Malay names with spaces come out correctly.
 - [ ] Install with "Send to" ticked: right-click files in Explorer > Send to > EZ Bulk Rename
       opens them in the app.
 - [ ] 2,000 files in one folder: the window stays responsive while the preview updates.
-- [ ] Close and reopen the app: the last rules come back (the list in "Names from a list" does
+- [ ] Close and reopen the app: the last rules come back (the list in "Rename from list" does
       not — it is never saved).
 - [ ] At 125% and 150% display scaling, the table and rule cards are sharp and nothing in the
       toolbar is clipped.

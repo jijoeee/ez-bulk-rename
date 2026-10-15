@@ -22,6 +22,9 @@ PAIRS = [
     # EZ Bulk Rename: the preview table (changed rows, blocked rows, line text) and the Stop button
     ("TEXT", "PRIMARY_SOFT"), ("PRIMARY_TEXT", "SURFACE"), ("ON_PRIMARY", "DANGER_FILL"),
     ("TEXT_2", "SURFACE_2"), ("TEXT", "DANGER_SOFT"), ("TEXT_2", "BG"),
+    # the dark header bar and the table's column titles
+    ("HEADER_TEXT", "HEADER_BG"), ("HEADER_TEXT_2", "HEADER_BG"), ("HEADER_LINK", "HEADER_BG"),
+    ("HEADER_TEXT_2", "HEADER_HOVER"), ("TABLE_HEAD_TEXT", "TABLE_HEAD"),
 ]
 TOKEN = re.compile(r'^([A-Z_0-9]+)\s*=\s*\("(#[0-9A-Fa-f]{6})",\s*"(#[0-9A-Fa-f]{6})"\)', re.M)
 

@@ -183,7 +183,7 @@ class RemoveRule(Rule):
     trim: bool = True             # remove spaces, dots, dashes and underscores at the ends
     collapse: bool = True         # "a  b" -> "a b", "a__b" -> "a_b"
     KIND = "remove"
-    TITLE = "Remove / clean up"
+    TITLE = "Clean up"
 
     def apply(self, stem, ext, info):
         if self.characters:
@@ -232,7 +232,7 @@ class ListRule(Rule):
     mapping: dict[str, str] = field(default_factory=dict)   # lower-case old name -> new name
     source: str = ""                                          # file the list came from, for display
     KIND = "list"
-    TITLE = "Names from a list"
+    TITLE = "Rename from list"
 
     def apply(self, stem, ext, info):
         new = self.mapping.get((stem + ext).lower()) or self.mapping.get(stem.lower())

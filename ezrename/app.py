@@ -113,25 +113,27 @@ class App(_Root):
 
     # ================================================================ header
     def _build_header(self):
-        bar = ctk.CTkFrame(self, fg_color=T.SURFACE, corner_radius=0, height=60)
+        # A deep teal bar in light mode too, so the window isn't all white (Boss, 2026-10-15).
+        bar = ctk.CTkFrame(self, fg_color=T.HEADER_BG, corner_radius=0, height=60)
         bar.pack(fill="x")
         bar.pack_propagate(False)
         brand = ctk.CTkFrame(bar, fg_color="transparent")
         brand.pack(side="left", padx=T.SPACE_4)
         ctk.CTkLabel(brand, text="", image=T.asset_image("logo.png", 32)).pack(side="left", padx=(0, 10))
-        ctk.CTkLabel(brand, text=APP_NAME, font=T.font(16, True), text_color=T.TEXT).pack(side="left")
-        ctk.CTkLabel(brand, text=f"by {BRAND}", font=T.font(12), text_color=T.TEXT_3).pack(side="left", padx=(8, 0), pady=(3, 0))
+        ctk.CTkLabel(brand, text=APP_NAME, font=T.font(16, True), text_color=T.HEADER_TEXT).pack(side="left")
+        ctk.CTkLabel(brand, text=f"by {BRAND}", font=T.font(12), text_color=T.HEADER_TEXT_2).pack(side="left", padx=(8, 0), pady=(3, 0))
 
         right = ctk.CTkFrame(bar, fg_color="transparent")
         right.pack(side="right", padx=T.SPACE_3)
-        icon_button(right, "info", self.show_about).pack(side="right")
-        self.theme_btn = icon_button(right, "moon", self.toggle_theme)
+        icon_button(right, "info", self.show_about, color=T.HEADER_TEXT_2, hover_color=T.HEADER_HOVER).pack(side="right")
+        self.theme_btn = icon_button(right, "moon", self.toggle_theme, color=T.HEADER_TEXT_2,
+                                     hover_color=T.HEADER_HOVER)
         self.theme_btn.pack(side="right", padx=(0, 2))
         self._paint_theme_button()
         ctk.CTkButton(right, text=f"More {BRAND} tools", command=lambda: webbrowser.open(WEBSITE),
-                      fg_color="transparent", hover_color=T.HOVER, text_color=T.PRIMARY_TEXT,
+                      fg_color="transparent", hover_color=T.HEADER_HOVER, text_color=T.HEADER_LINK,
                       font=T.font(12, True), height=34, corner_radius=T.RADIUS_S,
-                      image=T.icon("external", 15, T.PRIMARY_TEXT), compound="right").pack(side="right", padx=(0, T.SPACE_2))
+                      image=T.icon("external", 15, T.HEADER_LINK), compound="right").pack(side="right", padx=(0, T.SPACE_2))
         # One tool, so there is no tool navigation bar (and no orange underline beneath it).
         ctk.CTkFrame(self, height=2, fg_color=T.BORDER, corner_radius=0).pack(fill="x")
 
@@ -181,7 +183,7 @@ class App(_Root):
         if not paths:
             return event.action
         if self.tool.busy:
-            self.set_status("info", "Wait for the rename to finish, then drop the files again.")
+            self.set_status("info", "A rename is in progress. Drop the files again once it has finished.")
         else:
             self.tool.load(paths)
         return event.action
@@ -197,7 +199,7 @@ class App(_Root):
     # ================================================================ theme
     def _paint_theme_button(self):
         dark = ctk.get_appearance_mode() == "Dark"
-        self.theme_btn.configure(image=T.icon("sun" if dark else "moon", 18, T.TEXT_2))
+        self.theme_btn.configure(image=T.icon("sun" if dark else "moon", 18, T.HEADER_TEXT_2))
 
     def toggle_theme(self):
         new = "light" if ctk.get_appearance_mode() == "Dark" else "dark"
@@ -258,7 +260,7 @@ class App(_Root):
     def _on_close(self):
         # A rename is all-or-nothing and takes seconds; closing in the middle is refused, not risked.
         if self.tool.busy:
-            self.set_status("info", "Renaming... the window closes when you try again in a moment.")
+            self.set_status("info", "A rename is in progress. Close the window again once it has finished.")
             return
         self.destroy()
 

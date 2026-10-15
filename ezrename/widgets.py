@@ -42,9 +42,10 @@ def secondary_button(parent, text, command, icon=None, height=34, danger=False, 
 def icon_button(parent, icon, command, size=18, color=T.TEXT_2, **kw):
     kw.setdefault("width", 34)
     kw.setdefault("height", 34)
+    kw.setdefault("hover_color", T.HOVER)
     return ctk.CTkButton(
         parent, text="", corner_radius=T.RADIUS_S, command=command,
-        fg_color="transparent", hover_color=T.HOVER, image=T.icon(icon, size, color), **kw)
+        fg_color="transparent", image=T.icon(icon, size, color), **kw)
 
 
 def divider(parent, **pack):
@@ -231,14 +232,15 @@ class PreviewTable(ctk.CTkFrame):
         ("num", "#", 50, "e", False),
         ("old", "Current name", 230, "w", True),
         ("new", "New name", 230, "w", True),
-        ("status", "Status", 190, "w", True),
-        ("folder", "Folder", 150, "w", True),
+        ("status", "Status", 220, "w", True),
+        ("folder", "Folder", 120, "w", True),
     )
     STYLE = "EZRename.Treeview"
 
-    def __init__(self, master):
+    def __init__(self, master, on_select: Optional[Callable[[Optional[PreviewRow]], None]] = None):
         super().__init__(master, fg_color=T.SURFACE, bg_color=T.BG, corner_radius=T.RADIUS_M,
                          border_width=1, border_color=T.BORDER)
+        self._rows: dict[str, PreviewRow] = {}
         self.tree = ttk.Treeview(self, columns=[c[0] for c in self.COLUMNS], show="headings",
                                  style=self.STYLE, selectmode="browse")
         for key, title, _width, anchor, stretch in self.COLUMNS:
@@ -254,26 +256,33 @@ class PreviewTable(ctk.CTkFrame):
         self.empty = ctk.CTkLabel(self, text="", font=T.font(13), text_color=T.TEXT_2,
                                   justify="center", wraplength=420)
         self.tree.bind("<Configure>", lambda e: self._fit_columns(e.width), add="+")
+        if on_select is not None:
+            self.tree.bind("<<TreeviewSelect>>", lambda e: on_select(self.selected()))
         self.apply_style()
         ctk.ScalingTracker.add_widget(lambda *_: self.apply_style(), self)
+
+    def selected(self) -> Optional[PreviewRow]:
+        sel = self.tree.selection()
+        return self._rows.get(sel[0]) if sel else None
 
     def apply_style(self) -> None:
         scale = ctk.ScalingTracker.get_widget_scaling(self)
         style = ttk.Style(self)
         if style.theme_use() != "clam":
             style.theme_use("clam")  # the only built-in theme that honours custom colours everywhere
-        surface, surface_2 = T.pick(T.SURFACE), T.pick(T.SURFACE_2)
+        surface = T.pick(T.SURFACE)
         style.layout(self.STYLE, [("Treeview.treearea", {"sticky": "nswe"})])
         style.configure(self.STYLE, background=surface, fieldbackground=surface,
                         foreground=T.pick(T.TEXT), font=T.tk_font(13, scale),
                         rowheight=round(28 * scale), borderwidth=0, relief="flat")
         style.map(self.STYLE, background=[("selected", T.pick(T.HOVER))],
                   foreground=[("selected", T.pick(T.TEXT))])
-        style.configure(f"{self.STYLE}.Heading", background=surface_2, foreground=T.pick(T.TEXT_2),
+        head = T.pick(T.TABLE_HEAD)
+        style.configure(f"{self.STYLE}.Heading", background=head, foreground=T.pick(T.TABLE_HEAD_TEXT),
                         font=T.tk_font(12, scale, semibold=True), relief="flat", borderwidth=0,
-                        bordercolor=surface_2, lightcolor=surface_2, darkcolor=surface_2,
+                        bordercolor=head, lightcolor=head, darkcolor=head,
                         padding=(round(8 * scale), round(6 * scale)))
-        style.map(f"{self.STYLE}.Heading", background=[("active", T.pick(T.SURFACE_2))])
+        style.map(f"{self.STYLE}.Heading", background=[("active", head)])
         self.tree.tag_configure(OK, background=T.pick(T.CHANGE_ROW), foreground=T.pick(T.TEXT))
         self.tree.tag_configure(SAME, foreground=T.pick(T.UNCHANGED_TEXT))
         self.tree.tag_configure(BLOCKED, background=T.pick(T.BLOCKED_ROW), foreground=T.pick(T.TEXT))
@@ -296,37 +305,41 @@ class PreviewTable(ctk.CTkFrame):
     def _status(row: PreviewRow) -> str:
         if row.status == BLOCKED:
             return row.problem
-        return "Will be renamed" if row.status == OK else "No change"
+        return "Ready to rename" if row.status == OK else "Unchanged"
 
     def show(self, rows: list[PreviewRow], view: str = "all") -> None:
-        """Fill the table. ``view``: all | changes | problems."""
+        """Fill the table. ``view``: all | changes | issues."""
         self.tree.delete(*self.tree.get_children())
+        self._rows.clear()
         self.empty.place_forget()
         shown = 0
         for n, row in enumerate(rows, start=1):
             if view == "changes" and row.status != OK:
                 continue
-            if view == "problems" and row.status != BLOCKED:
+            if view == "issues" and row.status != BLOCKED:
                 continue
             folder = engine_short(row.item.folder)
-            self.tree.insert("", "end", values=(n, row.item.name, row.new_name if row.status != SAME else "—",
-                                                self._status(row), folder), tags=(row.status,))
+            iid = self.tree.insert("", "end", values=(n, row.item.name, row.new_name if row.status != SAME else "—",
+                                                      self._status(row), folder), tags=(row.status,))
+            self._rows[iid] = row
             shown += 1
         if not shown and rows:
-            self.show_empty("No problems — every file is ready." if view == "problems"
-                            else "No file would change yet. Add a rule on the right.")
+            self.show_empty("No issues found. Every file is ready to rename." if view == "issues"
+                            else "No changes yet. Add a rule on the right to build the new names.")
 
     def show_done(self, items, renamed: set[str]) -> None:
         """After a rename: every file under its name now, the renamed ones marked."""
         self.tree.delete(*self.tree.get_children())
+        self._rows.clear()
         self.empty.place_forget()
         for n, item in enumerate(items, start=1):
             done = os.path.normcase(item.path) in renamed
-            self.tree.insert("", "end", values=(n, item.name, "—", "Renamed" if done else "No change",
+            self.tree.insert("", "end", values=(n, item.name, "—", "Renamed" if done else "Unchanged",
                                                 engine_short(item.folder)), tags=(OK if done else SAME,))
 
     def show_empty(self, message: str) -> None:
         self.tree.delete(*self.tree.get_children())
+        self._rows.clear()
         self.empty.configure(text=message)
         self.empty.place(relx=0.5, rely=0.45, anchor="center")
 

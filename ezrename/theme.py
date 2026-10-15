@@ -44,6 +44,16 @@ SUCCESS_SOFT = ("#E8F5EE", "#1B3326")
 
 HOVER = ("#F0F8F8", "#243637")
 
+# Light mode is not all white: the header bar and the table's column titles are deep
+# teal, which frames the work area (Boss, 2026-10-15). In dark mode they stay dark.
+HEADER_BG = ("#1C3F41", "#1A2828")
+HEADER_TEXT = ("#FFFFFF", "#E6F1F1")
+HEADER_TEXT_2 = ("#B5D2D3", "#A3BBBC")   # "by EZKerja", header icons
+HEADER_LINK = ("#9FE3E6", "#8DD7DA")     # "More EZKerja tools"
+HEADER_HOVER = ("#29575A", "#243637")
+TABLE_HEAD = ("#2A4E50", "#1F2F30")
+TABLE_HEAD_TEXT = ("#FFFFFF", "#A3BBBC")
+
 # The preview table: a row that will be renamed is tinted, a row that is blocked
 # (duplicate name, illegal character...) is red, a row with no change is quiet.
 CHANGE_ROW = PRIMARY_SOFT

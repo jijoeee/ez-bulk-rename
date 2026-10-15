@@ -35,7 +35,7 @@ ezrename/
   __init__.py           version and identity (the only place the version lives)
   rules.py              the eight rename rules; each turns (name, extension) into a new one. No UI.
   engine.py             collecting files, preview checks, two-step rename with rollback, undo logs. No UI.
-  mapping.py            "Names from a list": reading .xlsx / .csv. No UI.
+  mapping.py            "Rename from list": reading .xlsx / .csv. No UI.
   tools.py              the rename screen: preview table, files options, rule cards, undo menu
   widgets.py            buttons, drop zone, result panel, preview table, rule card
   app.py                main window: header, status bar, drag and drop, keys, About
@@ -63,7 +63,7 @@ installer/installer.iss Inno Setup script (per-user, no admin; optional "Send to
 
 ## Notes
 
-- **"Names from a list"** reads the first two filled-in columns of the first sheet. A header row
+- **"Rename from list"** reads the first two filled-in columns of the first sheet. A header row
   ("Old name | New name", "Staff ID | Nama") is skipped. The list itself is never saved in
   settings: it often holds staff names.
 - **The last rules are remembered** between sessions (in `settings.json`), so a monthly job is one

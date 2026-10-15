@@ -21,12 +21,12 @@ from .mapping import load_mapping
 from .rules import RenameError
 from .system import app_data_dir, open_path, reveal_in_folder
 from .widgets import (AutoScrollFrame, DropZone, PreviewTable, ResultPanel, RuleCard, checkbox, divider,
-                      primary_button, secondary_button, section_label, set_entry_text, text_entry)
+                      primary_button, secondary_button, section_label)
 
 log = logging.getLogger("ezrename.tools")
 
 ORDER_OPTIONS = [("Name", "name"), ("Date modified", "modified"), ("Date created", "created"), ("Size", "size")]
-VIEW_OPTIONS = [("All files", "all"), ("Will change", "changes"), ("Problems", "problems")]
+VIEW_OPTIONS = [("All", "all"), ("To rename", "changes"), ("Issues", "issues")]
 ADD_RULE_LABEL = "+ Add a rule"
 
 
@@ -47,11 +47,17 @@ class RenameTool(ctk.CTkFrame):
         self.app = app
         self.busy = False
         self.added_paths: list[str] = []          # what the user dropped or chose (files and folders)
-        self.items: list[FileItem] = []           # the files, in numbering order
+        self.all_items: list[FileItem] = []       # every file found, before the file-type filter
+        self.items: list[FileItem] = []           # the files to rename, in numbering order
+        self.excluded_exts: set[str] = set()      # file types the user unticked (".jpg", "" = none)
+        self.type_vars: dict[str, ctk.BooleanVar] = {}
         self.rules: list[R.Rule] = []
         self.cards: list[RuleCard] = []
         self.preview: Optional[Preview] = None
-        self._gen = 0
+        # Separate "latest request" counters: a slow folder scan must not be cancelled by a
+        # preview started meanwhile, and the other way round.
+        self._collect_gen = 0
+        self._preview_gen = 0
         self._preview_job = None
         self._just_renamed = False                # Rename stays off until something changes
         self._renamed_paths: set[str] = set()     # new paths of the last rename, for the table
@@ -97,7 +103,7 @@ class RenameTool(ctk.CTkFrame):
         self.counts = ctk.CTkLabel(self.viewbar, text="", font=T.font(12), text_color=T.TEXT_2)
         self.counts.pack(side="left", padx=(T.SPACE_3, 0))
 
-        self.table = PreviewTable(self.work)
+        self.table = PreviewTable(self.work, on_select=self._row_selected)
 
     def _build_sidebar(self):
         self.sidebar = ctk.CTkFrame(self, width=T.SIDEBAR_W, fg_color=T.SURFACE, corner_radius=0)
@@ -137,13 +143,26 @@ class RenameTool(ctk.CTkFrame):
         o = self.options
         section_label(o, "Files")
         self.sub_box, self.include_sub = checkbox(o, "Include subfolders", False, command=self.files_changed)
-        ctk.CTkLabel(o, text="Only these extensions", font=T.font(12), text_color=T.TEXT, anchor="w").pack(
-            fill="x", pady=(T.SPACE_2, T.SPACE_1))
-        self.ext_entry = text_entry(o, "e.g. pdf jpg (empty = all files)")
-        self.ext_entry.pack(fill="x")
-        self.ext_entry.bind("<KeyRelease>", lambda e: self._later(self.files_changed, 400), add="+")
-        ctk.CTkLabel(o, text="Number in this order", font=T.font(12), text_color=T.TEXT, anchor="w").pack(
-            fill="x", pady=(T.SPACE_2, T.SPACE_1))
+
+        # File types: one tick box per extension found in the added files, all ticked at first.
+        types_head = ctk.CTkFrame(o, fg_color="transparent")
+        types_head.pack(fill="x", pady=(T.SPACE_2, T.SPACE_1))
+        ctk.CTkLabel(types_head, text="File types", font=T.font(12), text_color=T.TEXT, anchor="w").pack(side="left")
+        self.types_none = ctk.CTkButton(types_head, text="None", command=lambda: self._set_all_types(False),
+                                        fg_color="transparent", hover_color=T.HOVER, text_color=T.PRIMARY_TEXT,
+                                        font=T.font(11), height=22, width=10)
+        self.types_all = ctk.CTkButton(types_head, text="All", command=lambda: self._set_all_types(True),
+                                       fg_color="transparent", hover_color=T.HOVER, text_color=T.PRIMARY_TEXT,
+                                       font=T.font(11), height=22, width=10)
+        self.types_box = ctk.CTkFrame(o, fg_color="transparent", height=1)
+        self.types_box.pack(fill="x")
+        self.types_box.grid_columnconfigure((0, 1), weight=1, uniform="types")
+        self.types_hint = ctk.CTkLabel(o, text="", font=T.font(11), text_color=T.TEXT_2, anchor="w",
+                                       justify="left", wraplength=T.CONTENT_W)
+        self.types_hint.pack(fill="x")
+
+        ctk.CTkLabel(o, text="Numbering order", font=T.font(12), text_color=T.TEXT, anchor="w").pack(
+            fill="x", pady=(T.SPACE_3, T.SPACE_1))
         self.order = ctk.CTkOptionMenu(
             o, values=[t for t, _v in ORDER_OPTIONS], command=lambda _v: self.reorder(), height=32,
             corner_radius=T.RADIUS_S, font=T.font(12), dropdown_font=T.font(12), fg_color=T.SURFACE_2,
@@ -154,8 +173,9 @@ class RenameTool(ctk.CTkFrame):
         section_label(o, "Rules", top=T.SPACE_4)
         ctk.CTkLabel(o, text="Applied from top to bottom.", font=T.font(11), text_color=T.TEXT_2,
                      anchor="w").pack(fill="x")
+        # Packed only while it holds rule cards: Tk keeps an emptied frame at its old height,
+        # which would leave "+ Add a rule" stranded further down after removing the last rule.
         self.rules_box = ctk.CTkFrame(o, fg_color="transparent", height=1)
-        self.rules_box.pack(fill="x")
         self.add_rule = ctk.CTkOptionMenu(
             o, values=[cls.TITLE for cls in R.RULE_TYPES.values()], command=self._add_rule_chosen,
             height=34, corner_radius=T.RADIUS_S, font=T.font(13, True), dropdown_font=T.font(12),
@@ -175,7 +195,6 @@ class RenameTool(ctk.CTkFrame):
     def _load_settings(self):
         s = self.app.settings
         self.include_sub.set(bool(s.get("include_subfolders", False)))
-        set_entry_text(self.ext_entry, s.get("extensions", ""))
         by_value = {v: t for t, v in ORDER_OPTIONS}
         self.order.set(by_value.get(s.get("order", "name"), "Name"))
         # The last rules come back, so the same monthly job is one drop and one click.
@@ -193,7 +212,6 @@ class RenameTool(ctk.CTkFrame):
     def _save_settings(self):
         s = self.app.settings
         s.set("include_subfolders", self.include_sub.get())
-        s.set("extensions", self.ext_entry.get())
         s.set("order", self.order_value())
         saved = []
         for rule in self.rules:
@@ -229,27 +247,31 @@ class RenameTool(ctk.CTkFrame):
         if self.busy:
             self.action_btn.configure(state="disabled", fg_color=T.PRIMARY_DISABLED)
             return
-        ready = p is not None and p.can_apply and not self._just_renamed
-        n = p.changing if p else 0
+        ready = bool(self.items) and p is not None and p.can_apply and not self._just_renamed
+        # The count only while it can really happen: "Rename 2 files" beside 7 issues misleads.
+        n = p.changing if p and not p.blocked else 0
         self.action_btn.configure(
             text=f"Rename {engine.plural(n, 'file')}" if n else "Rename",
             state="normal" if ready else "disabled",
             fg_color=T.PRIMARY if ready else T.PRIMARY_DISABLED, hover_color=T.PRIMARY_HOVER)
-        if not self.items:
+        if not self.all_items:
             self.summary.configure(text="Add files or a folder, then add a rule.")
+        elif not self.items:
+            self.summary.configure(text="Tick at least one file type to rename.")
         elif self._just_renamed:
-            self.summary.configure(text="Done. Change a rule or add files to rename again.")
-            self.action_btn.configure(text="Renamed", state="disabled", fg_color=T.PRIMARY_DISABLED)
+            self.summary.configure(text="Rename complete. Change a rule or add files to start a new batch.")
+            self.action_btn.configure(text="Rename complete", state="disabled", fg_color=T.PRIMARY_DISABLED)
         elif not self.rules:
-            self.summary.configure(text="Add a rule to see the new names.")
+            self.summary.configure(text="Add a rule to build the new names.")
         elif p is None:
-            self.summary.configure(text="Working out the new names...")
+            self.summary.configure(text="Updating the preview...")
         elif p.blocked:
-            self.summary.configure(text=f"Fix the {engine.plural(p.blocked, 'problem')} shown in red first.")
+            self.summary.configure(text=f"Resolve the {engine.plural(p.blocked, 'issue')} highlighted in red "
+                                        "before renaming.")
         elif not p.changing:
-            self.summary.configure(text="No file would change with these rules.")
+            self.summary.configure(text="These rules don't change any file name.")
         else:
-            self.summary.configure(text="Check the New name column, then click Rename. You can undo it.")
+            self.summary.configure(text="Review the new names, then click Rename. Every batch can be undone.")
 
     def set_drop_highlight(self, on: bool):
         if self.drop_zone.winfo_ismapped():
@@ -285,7 +307,15 @@ class RenameTool(ctk.CTkFrame):
     def clear(self):
         if self.busy:
             return
-        self.added_paths, self.items, self.preview = [], [], None
+        # A scan or preview still running must not bring the old files back afterwards.
+        self._collect_gen += 1
+        self._preview_gen += 1
+        if self._preview_job:
+            self.after_cancel(self._preview_job)
+            self._preview_job = None
+        self.added_paths, self.all_items, self.items, self.preview = [], [], [], None
+        self.excluded_exts.clear()
+        self._rebuild_types()
         self._just_renamed = False
         self.result_panel.clear()
         self.show_empty()
@@ -298,43 +328,90 @@ class RenameTool(ctk.CTkFrame):
         self.recollect()
 
     def recollect(self):
-        """List the files again (after adding paths, or changing subfolders / extensions)."""
+        """List the files again (after adding paths, or changing the subfolders option)."""
         self._save_settings()
         if not self.added_paths:
-            self.items = []
+            self.all_items, self.items = [], []
+            self._rebuild_types()
             self.show_empty()
             return
-        paths, sub = list(self.added_paths), self.include_sub.get()
-        exts, order = engine.parse_extensions(self.ext_entry.get()), self.order_value()
-        self._gen += 1
-        gen = self._gen
+        paths, sub, order = list(self.added_paths), self.include_sub.get(), self.order_value()
+        self._collect_gen += 1
+        gen = self._collect_gen
 
         def work():
             try:
-                items = engine.sort_items(engine.collect(paths, sub, exts), order)
+                items = engine.sort_items(engine.collect(paths, sub), order)
             except Exception:
                 log.exception("Listing files failed")
                 items = []
             self.app.call_soon(lambda: self._collected(gen, items))
 
-        self.app.set_status("busy", "Listing files...")
+        self.app.set_status("busy", "Scanning files...")
         threading.Thread(target=work, daemon=True).start()
 
     def _collected(self, gen: int, items: list[FileItem]):
-        if gen != self._gen:
+        if gen != self._collect_gen:
             return
-        self.items = items
+        self.all_items = items
+        self._rebuild_types()
         self.show_content()
         self.app.set_status("ready", "Ready.")
-        if not items:
-            self.preview = None
-            self.heading.configure(text="No files")
-            self.counts.configure(text="")
-            self.table.show_empty("No files here match. Check “Only these extensions” or tick "
-                                  "“Include subfolders”.")
-            self.refresh()
+        self._apply_types()
+
+    # ================================================================ file types
+    def _rebuild_types(self):
+        """One tick box per file type found. Types the user unticked stay unticked."""
+        for child in self.types_box.winfo_children():
+            child.destroy()
+        self.type_vars = {}
+        counts = engine.extension_counts(self.all_items)
+        present = {ext for ext, _n in counts}
+        self.excluded_exts &= present          # forget types that are no longer in the list
+        for n, (ext, count) in enumerate(counts):
+            var = ctk.BooleanVar(value=ext not in self.excluded_exts)
+            ctk.CTkCheckBox(self.types_box, text=f"{engine.extension_label(ext)} ({count:,})", variable=var,
+                            command=self._types_changed, font=T.font(12), text_color=T.TEXT,
+                            fg_color=T.PRIMARY, hover_color=T.PRIMARY_HOVER, border_color=T.TEXT_3,
+                            checkmark_color=T.ON_PRIMARY, border_width=2, checkbox_width=16, checkbox_height=16,
+                            corner_radius=4).grid(row=n // 2, column=n % 2, sticky="w", pady=(T.SPACE_1, 0))
+            self.type_vars[ext] = var
+        many = len(counts) > 1
+        for btn in (self.types_none, self.types_all):
+            if many and not btn.winfo_manager():
+                btn.pack(side="right")
+            elif not many and btn.winfo_manager():
+                btn.pack_forget()
+        self.types_hint.configure(text="" if counts else "Add files to see their types here.")
+        if not counts and not self.types_hint.winfo_manager():
+            self.types_hint.pack(fill="x", after=self.types_box)
+        elif counts and self.types_hint.winfo_manager():
+            self.types_hint.pack_forget()
+        self.after_idle(self.side_scroll.fit)
+
+    def _set_all_types(self, on: bool):
+        for var in self.type_vars.values():
+            var.set(on)
+        self._types_changed()
+
+    def _types_changed(self):
+        self.excluded_exts = {ext for ext, var in self.type_vars.items() if not var.get()}
+        self._just_renamed = False
+        self.result_panel.clear()
+        self._apply_types()
+
+    def _apply_types(self):
+        """The files to rename: every file found, minus the unticked types."""
+        items = [i for i in self.all_items if engine.extension_of(i.name) not in self.excluded_exts]
+        self.items = engine.sort_items(items, self.order_value())
+        if not self.all_items:
+            self._show_no_files("No files found here. If they are in subfolders, tick "
+                                "“Include subfolders”.")
             return
-        self.heading.configure(text=engine.plural(len(items), "file"))
+        if not self.items:
+            self._show_no_files("No file types selected. Tick at least one under File types.")
+            return
+        self.heading.configure(text=engine.plural(len(self.items), "file"))
         if self._just_renamed:
             # Show the result, not the rules applied a second time to the new names.
             self.preview = None
@@ -343,7 +420,15 @@ class RenameTool(ctk.CTkFrame):
                                   text_color=T.TEXT_2)
             self.refresh()
             return
-        self.update_preview()
+        self.changed(keep_result=True)
+
+    def _show_no_files(self, message: str):
+        self._preview_gen += 1           # a preview still running belongs to the old list
+        self.preview = None
+        self.heading.configure(text="No files")
+        self.counts.configure(text="")
+        self.table.show_empty(message)
+        self.refresh()
 
     def reorder(self):
         self._save_settings()
@@ -363,8 +448,15 @@ class RenameTool(ctk.CTkFrame):
         card.pack(fill="x", pady=(T.SPACE_2, 0))
         self.rules.append(rule)
         self.cards.append(card)
+        self._sync_rules_box()
         if refresh:
             self.changed()
+
+    def _sync_rules_box(self):
+        if self.cards and not self.rules_box.winfo_manager():
+            self.rules_box.pack(fill="x", before=self.add_rule)
+        elif not self.cards and self.rules_box.winfo_manager():
+            self.rules_box.pack_forget()
 
     def _move_card(self, card: RuleCard, step: int):
         i = self.cards.index(card)
@@ -383,6 +475,7 @@ class RenameTool(ctk.CTkFrame):
         i = self.cards.index(card)
         self.cards.pop(i).destroy()
         self.rules.pop(i)
+        self._sync_rules_box()
         self.changed()
 
     def _pick_list(self, card: RuleCard):
@@ -412,10 +505,11 @@ class RenameTool(ctk.CTkFrame):
             self.after_cancel(self._preview_job)
         self._preview_job = self.after(ms, fn)
 
-    def changed(self):
+    def changed(self, keep_result: bool = False):
         """Any rule, file or option changed: work out the new names again, shortly."""
         self._just_renamed = False
-        self.result_panel.clear()
+        if not keep_result:
+            self.result_panel.clear()
         self.after_idle(self.side_scroll.fit)
         self._save_settings()
         self.preview = None
@@ -428,8 +522,8 @@ class RenameTool(ctk.CTkFrame):
             self.refresh()
             return
         items, rules = list(self.items), copy.deepcopy(self.rules)   # the worker gets its own copy
-        self._gen += 1
-        gen = self._gen
+        self._preview_gen += 1
+        gen = self._preview_gen
 
         def work():
             try:
@@ -447,7 +541,7 @@ class RenameTool(ctk.CTkFrame):
         threading.Thread(target=work, daemon=True).start()
 
     def _preview_failed(self, gen: int, message: str):
-        if gen != self._gen:
+        if gen != self._preview_gen:
             return
         self.preview = None
         self.table.show_empty(message)
@@ -456,17 +550,22 @@ class RenameTool(ctk.CTkFrame):
         self.refresh()
 
     def _preview_done(self, gen: int, preview: Preview):
-        if gen != self._gen:
+        if gen != self._preview_gen:
             return
         self.preview = preview
         self._show_rows()
-        parts = [f"{engine.plural(preview.changing, 'file')} will change"]
+        parts = [f"{preview.changing:,} to rename"] if preview.changing else []
         if preview.blocked:
-            parts.append(engine.plural(preview.blocked, "problem"))
+            parts.append(engine.plural(preview.blocked, "issue"))
         if preview.unchanged:
             parts.append(f"{preview.unchanged:,} unchanged")
         self.counts.configure(text=" · ".join(parts), text_color=T.DANGER if preview.blocked else T.TEXT_2)
         self.refresh()
+
+    def _row_selected(self, row) -> None:
+        """Clicking a red row explains the issue in full in the status bar."""
+        if row is not None and row.status == engine.BLOCKED:
+            self.app.set_status("info", f"{row.item.name}: {row.detail or row.problem}")
 
     def _show_rows(self):
         if self.preview is None:
@@ -521,9 +620,9 @@ class RenameTool(ctk.CTkFrame):
         self._follow_moves(moved)
         self.result_panel.show(
             "success", f"{engine.plural(result.renamed, 'file')} renamed",
-            "The old names are saved in an undo log.",
+            "The original names are saved in an undo log.",
             [("Undo this rename", "undo", lambda: self.undo_from(result.log_path)),
-             ("Show the undo log", "history", lambda: reveal_in_folder(result.log_path))])
+             ("Show undo log", "history", lambda: reveal_in_folder(result.log_path))])
         self.app.set_status("success", f"{engine.plural(result.renamed, 'file')} renamed.")
         self.refresh()
 
@@ -538,11 +637,11 @@ class RenameTool(ctk.CTkFrame):
                        activebackground=T.pick(T.PRIMARY_SOFT), activeforeground=T.pick(T.TEXT),
                        font=T.tk_font(12, ctk.ScalingTracker.get_widget_scaling(self)))
         last = self.app.settings.get("last_log")
-        menu.add_command(label="Undo the last rename", command=lambda: self.undo_from(last),
+        menu.add_command(label="Undo last rename", command=lambda: self.undo_from(last),
                          state="normal" if last and os.path.exists(last) else "disabled")
         menu.add_command(label="Undo from a log file...", command=self.undo_choose)
         menu.add_separator()
-        menu.add_command(label="Open the undo logs folder", command=lambda: open_path(undo_log_dir()))
+        menu.add_command(label="Open undo logs folder", command=lambda: open_path(undo_log_dir()))
         x = self.undo_btn.winfo_rootx()
         y = self.undo_btn.winfo_rooty() + self.undo_btn.winfo_height()
         try:
@@ -561,7 +660,7 @@ class RenameTool(ctk.CTkFrame):
             return
         self.busy = True
         self.refresh()
-        self.app.set_status("busy", "Putting the old names back...")
+        self.app.set_status("busy", "Restoring the original names...")
 
         def work():
             try:
@@ -581,7 +680,7 @@ class RenameTool(ctk.CTkFrame):
 
     def _undo_failed(self, message: str):
         self.busy = False
-        self._show_error("Not undone", message)
+        self._show_error("Undo failed", message)
         self.refresh()
 
     def _undone(self, path: str, pairs: list[tuple[str, str]], result: engine.UndoResult):
@@ -592,10 +691,12 @@ class RenameTool(ctk.CTkFrame):
         if result.skipped:
             shown = "\n".join(f"• {os.path.basename(p)} {why}" for p, why in result.skipped[:5])
             more = f"\n…and {len(result.skipped) - 5:,} more." if len(result.skipped) > 5 else ""
-            detail = f"Not put back:\n{shown}{more}"
+            detail = f"Could not restore:\n{shown}{more}"
         kind = "success" if result.restored else "info"
-        self.result_panel.show(kind, f"{engine.plural(result.restored, 'file')} back to the old name", detail)
-        self.app.set_status(kind, f"Undone: {engine.plural(result.restored, 'file')} renamed back.")
+        self.result_panel.show(kind, f"{engine.plural(result.restored, 'file')} restored to the original name"
+                               if result.restored == 1 else
+                               f"{engine.plural(result.restored, 'file')} restored to their original names", detail)
+        self.app.set_status(kind, f"Undo complete: {engine.plural(result.restored, 'file')} restored.")
         if self.added_paths:
             back = {os.path.normcase(new): old for old, new in pairs}
             self._just_renamed = False

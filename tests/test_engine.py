@@ -41,6 +41,22 @@ def test_collect_dedupes_and_skips_temp_files(tmp_path):
     assert [i.name for i in items] == ["a.txt"]
 
 
+def test_system_and_hidden_files_are_never_listed(tmp_path):
+    make(tmp_path, "scan1.pdf", "desktop.ini", "Thumbs.db", "~$report.docx", ".hidden.pdf", ".git/config")
+    assert [i.name for i in collect([str(tmp_path)], include_subfolders=True)] == ["scan1.pdf"]
+    # Chosen one by one, a system file is still refused; a hidden file is allowed.
+    picked = collect([str(tmp_path / "desktop.ini"), str(tmp_path / ".hidden.pdf")])
+    assert [i.name for i in picked] == [".hidden.pdf"]
+
+
+def test_extension_counts():
+    names = ["a.pdf", "b.PDF", "c.jpg", "README"]
+    items = [engine.FileItem(path=n, folder="", name=n, size=0, modified=0, created=0) for n in names]
+    assert engine.extension_counts(items) == [(".pdf", 2), ("", 1), (".jpg", 1)]
+    assert engine.extension_label(".pdf") == "PDF"
+    assert engine.extension_label("") == "No extension"
+
+
 def test_parse_extensions():
     assert engine.parse_extensions("pdf, .JPG docx") == frozenset({".pdf", ".jpg", ".docx"})
     assert engine.parse_extensions("  ") == frozenset()
@@ -60,7 +76,7 @@ def test_duplicate_new_names_are_blocked(tmp_path):
     make(tmp_path, "a1.txt", "a2.txt")
     p = build_preview(collect([str(tmp_path)]), [ReplaceRule(find=r"\d", replace="", regex=True)])
     assert [r.status for r in p.rows] == [BLOCKED, BLOCKED]
-    assert "same name" in p.rows[0].problem
+    assert "Duplicate name" in p.rows[0].problem and "numbering" in p.rows[0].detail
     assert not p.can_apply
 
 
@@ -69,7 +85,7 @@ def test_existing_file_is_never_replaced(tmp_path):
     items = [i for i in collect([str(tmp_path)]) if i.name == "a.txt"]
     p = build_preview(items, [ReplaceRule(find="a", replace="b")])
     assert p.rows[0].status == BLOCKED
-    assert "already in the folder" in p.rows[0].problem
+    assert p.rows[0].problem == "Name already in use"
 
 
 def test_name_freed_in_the_same_batch_is_allowed(tmp_path):
@@ -82,7 +98,7 @@ def test_name_freed_in_the_same_batch_is_allowed(tmp_path):
 
 
 @pytest.mark.parametrize("bad,reason", [
-    ("a?b", "doesn't allow"), ("CON", "reserves"), ("nul", "reserves")])
+    ("a?b", "Not allowed: ?"), ("CON", "Reserved name"), ("nul", "Reserved name")])
 def test_illegal_windows_names_are_blocked(tmp_path, bad, reason):
     make(tmp_path, "file.txt")
     rule = ReplaceRule(find="file", replace=bad)
@@ -96,14 +112,14 @@ def test_name_ending_in_space_is_blocked(tmp_path):
     make(tmp_path, "file")
     p = build_preview(collect([str(tmp_path)]), [AddTextRule(suffix=" ")])
     assert p.rows[0].status == BLOCKED
-    assert "end with" in p.rows[0].problem
+    assert p.rows[0].problem == "Ends with a space or dot"
 
 
 def test_path_too_long_is_blocked(tmp_path):
     make(tmp_path, "a.txt")
     p = build_preview(collect([str(tmp_path)]), [AddTextRule(prefix="x" * 250)])
     assert p.rows[0].status == BLOCKED
-    assert "too long" in p.rows[0].problem
+    assert p.rows[0].problem.startswith("Path too long") and "259" in p.rows[0].detail
 
 
 def test_empty_name_is_blocked(tmp_path):

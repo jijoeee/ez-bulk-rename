@@ -1,0 +1,6 @@
+# Runtime dependencies. Versions are pinned to the ones this release was tested with.
+# openpyxl reads Excel rename lists; renaming itself uses only Python's standard library.
+customtkinter==5.2.2
+tkinterdnd2==0.6.3
+openpyxl==3.1.5
+Pillow==12.1.1
